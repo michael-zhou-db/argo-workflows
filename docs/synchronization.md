@@ -225,6 +225,47 @@ The queue is then ordered by creation time-stamp: older Workflows are placed bef
 Workflows can only acquire a lock if they are at the front of the queue for that lock.
 This applies to both local and multiple controller locks.
 
+### Queueing strategy
+
+> v3.8 and after
+
+For local (ConfigMap) semaphores you can choose what happens when the Workflow at
+the front of the queue cannot acquire a lock, by setting a `queueingStrategy` for
+that semaphore:
+
+- `StrictFIFO` (default): a Workflow that cannot acquire a lock blocks the
+  Workflows behind it, even when there is spare capacity in the semaphore. Locks
+  are always granted in strict queue order.
+- `BestEffortFIFO`: a Workflow that cannot acquire a lock does not block the
+  Workflows behind it that do fit in the spare capacity. The queue order still
+  decides who is considered first, but Workflows admitted together may start in
+  any order among themselves.
+
+The strategy is configured in a key alongside the semaphore's limit, named after
+the limit key with a `.queueingStrategy` suffix:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-config
+data:
+  workflow: "400"
+  workflow.queueingStrategy: BestEffortFIFO
+  template: "2"  # no strategy key, so StrictFIFO
+```
+
+`StrictFIFO` guarantees ordering, but on a semaphore with many slots it limits how
+quickly slots are filled: capacity that the front of the queue cannot use stays
+idle until the front can proceed. `BestEffortFIFO` keeps the semaphore full, at
+the cost of exact start ordering. If you have a large semaphore and care more
+about throughput than about which Workflow starts first, prefer
+`BestEffortFIFO`.
+
+This setting applies to local semaphores only. Mutexes are unaffected, since a
+single-slot lock has no spare capacity to give away, and
+[multiple controller locks](#multiple-controller-locks) always use `StrictFIFO`.
+
 ## Multiple locks
 
 > v3.6 and after

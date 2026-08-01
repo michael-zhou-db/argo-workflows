@@ -56,7 +56,7 @@ type reconcileSim struct {
 	utilization []int
 }
 
-func newReconcileSim(ctx context.Context, tb testing.TB, limit, total, holdRounds int) *reconcileSim {
+func newReconcileSim(ctx context.Context, tb testing.TB, limit, total, holdRounds int, strategy QueueingStrategy) *reconcileSim {
 	tb.Helper()
 	sim := &reconcileSim{
 		limit:      limit,
@@ -67,7 +67,7 @@ func newReconcileSim(ctx context.Context, tb testing.TB, limit, total, holdRound
 	sem, err := newInternalSemaphore(ctx, "bench", func(key string) {
 		sim.enqueues++
 		sim.enqueued[key] = true
-	}, func(context.Context, string) (int, error) { return limit, nil }, 0)
+	}, func(context.Context, string) (int, QueueingStrategy, error) { return limit, strategy, nil }, 0)
 	if err != nil {
 		tb.Fatalf("newInternalSemaphore: %v", err)
 	}
@@ -212,37 +212,39 @@ var benchScenarios = []scenario{
 func TestSemaphorePromotionCost(t *testing.T) {
 	ctx := logging.TestContext(t.Context())
 
-	t.Logf("%-18s %7s %7s %9s %9s %7s %7s %6s",
-		"scenario", "limit", "wfs", "rounds", "optimum", "ratio", "ampl", "util")
+	t.Logf("%-18s %-15s %7s %7s %9s %9s %7s %7s %6s",
+		"scenario", "strategy", "limit", "wfs", "rounds", "optimum", "ratio", "ampl", "util")
 
 	for _, sc := range benchScenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			sim := newReconcileSim(ctx, t, sc.limit, sc.total, sc.holdRounds)
+		for _, strategy := range []QueueingStrategy{StrictFIFO, BestEffortFIFO} {
+			t.Run(sc.name+"/"+string(strategy), func(t *testing.T) {
+				sim := newReconcileSim(ctx, t, sc.limit, sc.total, sc.holdRounds, strategy)
 
-			// Cap generously: the quadratic case needs ~limit rounds per wave, so
-			// allow that plus slack. Hitting the cap is reported, not hidden.
-			waves := (sc.total + sc.limit - 1) / sc.limit
-			maxRounds := waves * (sc.limit + sc.holdRounds) * 4
+				// Cap generously: the quadratic case needs ~limit rounds per wave, so
+				// allow that plus slack. Hitting the cap is reported, not hidden.
+				waves := (sc.total + sc.limit - 1) / sc.limit
+				maxRounds := waves * (sc.limit + sc.holdRounds) * 4
 
-			start := time.Now()
-			completed, hitCap := sim.run(ctx, maxRounds)
-			elapsed := time.Since(start)
+				start := time.Now()
+				completed, hitCap := sim.run(ctx, maxRounds)
+				elapsed := time.Since(start)
 
-			optimum := waves * sc.holdRounds
-			ratio := float64(sim.rounds) / float64(optimum)
-			ampl := float64(sim.tryAcquires) / float64(sc.total)
+				optimum := waves * sc.holdRounds
+				ratio := float64(sim.rounds) / float64(optimum)
+				ampl := float64(sim.tryAcquires) / float64(sc.total)
 
-			t.Logf("%-18s %7d %7d %9d %9d %6.1fx %6.1fx %5.0f%%",
-				sc.name, sc.limit, sc.total, sim.rounds, optimum, ratio, ampl,
-				sim.meanUtilization()*100)
-			t.Logf("  completed=%d/%d enqueues=%d tryAcquires=%d wall=%s hitRoundCap=%v",
-				completed, sc.total, sim.enqueues, sim.tryAcquires, elapsed.Round(time.Millisecond), hitCap)
+				t.Logf("%-18s %-15s %7d %7d %9d %9d %6.1fx %6.1fx %5.0f%%",
+					sc.name, strategy, sc.limit, sc.total, sim.rounds, optimum, ratio, ampl,
+					sim.meanUtilization()*100)
+				t.Logf("  completed=%d/%d enqueues=%d tryAcquires=%d wall=%s hitRoundCap=%v",
+					completed, sc.total, sim.enqueues, sim.tryAcquires, elapsed.Round(time.Millisecond), hitCap)
 
-			if completed != sc.total {
-				t.Logf("  NOTE: only %d/%d workflows drained within %d rounds",
-					completed, sc.total, maxRounds)
-			}
-		})
+				if completed != sc.total {
+					t.Logf("  NOTE: only %d/%d workflows drained within %d rounds",
+						completed, sc.total, maxRounds)
+				}
+			})
+		}
 	}
 }
 
@@ -252,16 +254,18 @@ func TestSemaphorePromotionCost(t *testing.T) {
 func BenchmarkSemaphorePromotion(b *testing.B) {
 	ctx := logging.TestContext(b.Context())
 	for _, sc := range benchScenarios {
-		b.Run(sc.name, func(b *testing.B) {
-			waves := (sc.total + sc.limit - 1) / sc.limit
-			maxRounds := waves * (sc.limit + sc.holdRounds) * 4
-			b.ReportAllocs()
-			for b.Loop() {
-				sim := newReconcileSim(ctx, b, sc.limit, sc.total, sc.holdRounds)
-				sim.run(ctx, maxRounds)
-				b.ReportMetric(float64(sim.rounds), "rounds")
-				b.ReportMetric(float64(sim.tryAcquires)/float64(sc.total), "tryAcquire/wf")
-			}
-		})
+		for _, strategy := range []QueueingStrategy{StrictFIFO, BestEffortFIFO} {
+			b.Run(sc.name+"/"+string(strategy), func(b *testing.B) {
+				waves := (sc.total + sc.limit - 1) / sc.limit
+				maxRounds := waves * (sc.limit + sc.holdRounds) * 4
+				b.ReportAllocs()
+				for b.Loop() {
+					sim := newReconcileSim(ctx, b, sc.limit, sc.total, sc.holdRounds, strategy)
+					sim.run(ctx, maxRounds)
+					b.ReportMetric(float64(sim.rounds), "rounds")
+					b.ReportMetric(float64(sim.tryAcquires)/float64(sc.total), "tryAcquire/wf")
+				}
+			})
+		}
 	}
 }

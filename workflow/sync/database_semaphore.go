@@ -55,19 +55,22 @@ func (s *databaseSemaphore) longDBKey() string {
 	return "sem/" + s.shortDBKey
 }
 
-func (s *databaseSemaphore) getLimitFromDB(ctx context.Context, _ string) (int, error) {
+// getLimitFromDB reads the limit from the database. The strategy is always
+// StrictFIFO: the database path admits the queue head only, and is unaffected by
+// the strategy configured for in-memory semaphores.
+func (s *databaseSemaphore) getLimitFromDB(ctx context.Context, _ string) (int, QueueingStrategy, error) {
 	logger := s.logger(ctx)
 	// Update the limit from the database
 	limit, err := s.queries.GetSemaphoreLimit(ctx, s.shortDBKey)
 	if err != nil {
 		logger.WithField("key", s.shortDBKey).WithError(err).Error(ctx, "Failed to get limit")
-		return 0, err
+		return 0, StrictFIFO, err
 	}
 	logger.WithFields(logging.Fields{
 		"limit": limit.SizeLimit,
 		"key":   s.shortDBKey,
 	}).Debug(ctx, "Current limit")
-	return limit.SizeLimit, nil
+	return limit.SizeLimit, StrictFIFO, nil
 }
 
 // getLimit returns the semaphore limit. If isMutex this always returns 1.
@@ -75,7 +78,7 @@ func (s *databaseSemaphore) getLimitFromDB(ctx context.Context, _ string) (int, 
 func (s *databaseSemaphore) getLimit(ctx context.Context) int {
 	logger := s.logger(ctx)
 	logger.WithField("dbKey", s.shortDBKey).Info(ctx, "getLimit")
-	limit, _, err := s.limitGetter.get(ctx, s.shortDBKey)
+	limit, _, _, err := s.limitGetter.get(ctx, s.shortDBKey)
 	if err != nil {
 		// Fall back to the last known limit (returned by the cache alongside
 		// the error) rather than misreporting a transient failure as limit 0.

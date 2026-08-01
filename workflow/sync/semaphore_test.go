@@ -21,7 +21,7 @@ type semaphoreFactory func(ctx context.Context, t *testing.T, name, namespace st
 // createTestInternalSemaphore creates an in-memory semaphore for testing
 func createTestInternalSemaphore(ctx context.Context, t *testing.T, name, namespace string, limit int, nextWorkflow NextWorkflow) (semaphore, *sqldb.SessionProxy, func()) {
 	t.Helper()
-	sem, err := newInternalSemaphore(ctx, name, nextWorkflow, func(ctx context.Context, _ string) (int, error) { return limit, nil }, 0)
+	sem, err := newInternalSemaphore(ctx, name, nextWorkflow, func(ctx context.Context, _ string) (int, QueueingStrategy, error) { return limit, StrictFIFO, nil }, 0)
 	require.NoError(t, err)
 	return sem, nil, func() {}
 }
@@ -262,11 +262,11 @@ func TestCheckAcquireNotifiesCorrectKeyForTemplateSemaphore(t *testing.T) {
 func TestInternalSemaphoreReleaseWithLimitFetchFailure(t *testing.T) {
 	ctx := logging.TestContext(t.Context())
 	fail := false
-	getter := func(_ context.Context, _ string) (int, error) {
+	getter := func(_ context.Context, _ string) (int, QueueingStrategy, error) {
 		if fail {
-			return 0, fmt.Errorf("transient apiserver error")
+			return 0, StrictFIFO, fmt.Errorf("transient apiserver error")
 		}
-		return 1, nil
+		return 1, StrictFIFO, nil
 	}
 	nextWorkflow := func(_ string) {}
 

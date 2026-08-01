@@ -330,24 +330,29 @@ var WorkflowExistenceFunc = func(s string) bool {
 	return false
 }
 
-func GetSyncLimitFunc(kube *fake.Clientset) func(context.Context, string) (int, error) {
-	return func(ctx context.Context, lockName string) (int, error) {
+func GetSyncLimitFunc(kube *fake.Clientset) func(context.Context, string) (int, QueueingStrategy, error) {
+	return func(ctx context.Context, lockName string) (int, QueueingStrategy, error) {
 		items := strings.Split(lockName, "/")
 		if len(items) < 4 {
-			return 0, argoErr.New(argoErr.CodeBadRequest, "Invalid Config Map Key")
+			return 0, StrictFIFO, argoErr.New(argoErr.CodeBadRequest, "Invalid Config Map Key")
 		}
 
 		configMap, err := kube.CoreV1().ConfigMaps(items[0]).Get(ctx, items[2], metav1.GetOptions{})
 		if err != nil {
-			return 0, err
+			return 0, StrictFIFO, err
 		}
 
 		value, found := configMap.Data[items[3]]
 
 		if !found {
-			return 0, argoErr.New(argoErr.CodeBadRequest, "Invalid Sync configuration Key")
+			return 0, StrictFIFO, argoErr.New(argoErr.CodeBadRequest, "Invalid Sync configuration Key")
 		}
-		return strconv.Atoi(value)
+		strategy, err := ParseQueueingStrategy(configMap.Data[items[3]+".queueingStrategy"])
+		if err != nil {
+			return 0, StrictFIFO, argoErr.New(argoErr.CodeBadRequest, err.Error())
+		}
+		limit, err := strconv.Atoi(value)
+		return limit, strategy, err
 	}
 }
 
@@ -983,9 +988,9 @@ type mockGetSyncLimit struct {
 	outputErr  error
 }
 
-func (m *mockGetSyncLimit) getSyncLimit(_ context.Context, s string) (int, error) {
+func (m *mockGetSyncLimit) getSyncLimit(_ context.Context, s string) (int, QueueingStrategy, error) {
 	m.callCount++
-	return m.outputSize, m.outputErr
+	return m.outputSize, StrictFIFO, m.outputErr
 }
 
 func TestSemaphoreSizeCache(t *testing.T) {

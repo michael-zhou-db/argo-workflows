@@ -19,6 +19,7 @@ type prioritySemaphore struct {
 	semaphore    *sema.Weighted
 	lockHolder   map[string]bool
 	granted      map[string]bool
+	strategy     QueueingStrategy
 	nextWorkflow NextWorkflow
 	logger       loggerFn
 }
@@ -37,6 +38,7 @@ func newInternalSemaphore(ctx context.Context, name string, nextWorkflow NextWor
 		semaphore:    sema.NewWeighted(int64(0)),
 		lockHolder:   make(map[string]bool),
 		granted:      make(map[string]bool),
+		strategy:     StrictFIFO,
 		nextWorkflow: nextWorkflow,
 		logger:       logger.get,
 	}
@@ -48,8 +50,15 @@ func newInternalSemaphore(ctx context.Context, name string, nextWorkflow NextWor
 	return sem, err
 }
 
+// getLimit returns the current limit, and records the configured queueing
+// strategy so checkAcquire and grantWaiters can consult it. Both are refreshed
+// together, so a strategy change takes effect without a controller restart. On a
+// fetch error the last known strategy is kept, matching the limit fallback below.
 func (s *prioritySemaphore) getLimit(ctx context.Context) int {
-	limit, changed, err := s.limitGetter.get(ctx, s.name)
+	limit, strategy, changed, err := s.limitGetter.get(ctx, s.name)
+	if err == nil {
+		s.strategy = strategy
+	}
 	if err != nil {
 		// Fall back to the last known limit (returned by the cache alongside
 		// the error). Returning 0 here would make release() treat a transient
@@ -128,8 +137,24 @@ func (s *prioritySemaphore) release(ctx context.Context, key string) bool {
 	return true
 }
 
+// notifyWaiters enqueues the next N workflows who are waiting for the semaphore to the workqueue,
+// where N is the availability of the semaphore. If semaphore is out of capacity, this does nothing.
+//
+// Under StrictFIFO only the queue head can actually acquire, so the other N-1 wake up, find
+// themselves behind the head, and requeue. Under BestEffortFIFO the woken waiters are granted
+// and all of them can acquire, so grantWaiters both records and enqueues them.
 func (s *prioritySemaphore) notifyWaiters(ctx context.Context) {
-	s.grantWaiters(ctx, "")
+	if s.strategy == BestEffortFIFO {
+		s.grantWaiters(ctx, "")
+		return
+	}
+	triggerCount := min(s.pending.Len(), s.getLimit(ctx)-len(s.lockHolder))
+	for idx := range triggerCount {
+		item := s.pending.items[idx]
+		wfKey := workflowKey(item.key)
+		s.logger(ctx).WithField("workflow", wfKey).Debug(ctx, "Enqueue the workflow")
+		s.nextWorkflow(wfKey)
+	}
 }
 
 // grantWaiters grants the top-priority waiters (up to the free slots) and enqueues each
@@ -138,7 +163,13 @@ func (s *prioritySemaphore) notifyWaiters(ctx context.Context) {
 // don't re-wake the same head. skipKey is granted but not enqueued (the caller is already
 // reconciling it). The weighted semaphore is still the hard limit, so an over-grant never
 // over-acquires.
+//
+// Under StrictFIFO the grant set is unused; admission is decided by the front-of-queue
+// check in checkAcquire instead, so there is nothing to grant here.
 func (s *prioritySemaphore) grantWaiters(ctx context.Context, skipKey string) {
+	if s.strategy != BestEffortFIFO {
+		return
+	}
 	grantCount := s.getLimit(ctx) - len(s.lockHolder) - len(s.granted)
 	granted := 0
 	for idx := 0; idx < s.pending.Len() && granted < grantCount; idx++ {
@@ -257,13 +288,30 @@ func (s *prioritySemaphore) checkAcquire(ctx context.Context, holderKey string, 
 
 	waitingMsg := fmt.Sprintf("Waiting for %s lock. Lock status: %d/%d", s.name, limit-len(s.lockHolder), limit)
 
-	// A workflow may only acquire while granted. If not yet granted, try to grant now
-	// (covers a fresh arrival and the first acquire); skipKey avoids a self-enqueue.
-	if !s.granted[holderKey] {
-		s.grantWaiters(ctx, holderKey)
+	if s.strategy == BestEffortFIFO {
+		// A workflow may only acquire while granted. If not yet granted, try to grant now
+		// (covers a fresh arrival and the first acquire); skipKey avoids a self-enqueue.
 		if !s.granted[holderKey] {
-			logger.WithField("holderKey", holderKey).Info(ctx, "isn't granted a slot")
-			return false, false, waitingMsg
+			s.grantWaiters(ctx, holderKey)
+			if !s.granted[holderKey] {
+				logger.WithField("holderKey", holderKey).Info(ctx, "isn't granted a slot")
+				return false, false, waitingMsg
+			}
+		}
+	} else {
+		// StrictFIFO: check whether requested holdkey is in front of priority queue.
+		// If it is in front position, it will allow to acquire lock.
+		// If it is not a front key, it needs to wait for its turn.
+		if s.pending.Len() > 0 {
+			item := s.pending.peek()
+			if !isSameWorkflowNodeKeys(holderKey, item.key) {
+				// Enqueue the front workflow if lock is available
+				if len(s.lockHolder) < limit {
+					s.nextWorkflow(workflowKey(item.key))
+				}
+				logger.WithField("holderKey", holderKey).Info(ctx, "isn't at the front")
+				return false, false, waitingMsg
+			}
 		}
 	}
 	if s.semaphore.TryAcquire(1) {

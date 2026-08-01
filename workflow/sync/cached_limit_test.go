@@ -29,11 +29,13 @@ func TestGetLimitFirstCall(t *testing.T) {
 	// Setup
 	mockNow = time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
 	expectedLimit := 42
-	mockGetter := func(ctx context.Context, key string) (int, error) { return expectedLimit, nil }
+	mockGetter := func(ctx context.Context, key string) (int, QueueingStrategy, error) {
+		return expectedLimit, StrictFIFO, nil
+	}
 	cl := newCachedLimit(mockGetter, 10*time.Minute)
 
 	// Execute
-	limit, _, err := cl.get(context.Background(), "test-key")
+	limit, _, _, err := cl.get(context.Background(), "test-key")
 
 	// Verify
 	if err != nil {
@@ -57,15 +59,15 @@ func TestGetLimitMultipleCalls(t *testing.T) {
 	callCount := 0
 	ttl := 10 * time.Minute
 
-	mockGetter := func(ctx context.Context, key string) (int, error) {
+	mockGetter := func(ctx context.Context, key string) (int, QueueingStrategy, error) {
 		callCount++
-		return initialLimit + callCount, nil
+		return initialLimit + callCount, StrictFIFO, nil
 	}
 
 	cl := newCachedLimit(mockGetter, ttl)
 
 	// First call to populate cache
-	firstLimit, changed, err := cl.get(ctx, "test-key")
+	firstLimit, _, changed, err := cl.get(ctx, "test-key")
 	require.NoError(t, err, "Should not error with first value")
 	assert.Equal(t, initialLimit+1, firstLimit, "First limit should be initialLimit+1")
 	assert.True(t, changed, "First call should indicate limit changed")
@@ -77,7 +79,7 @@ func TestGetLimitMultipleCalls(t *testing.T) {
 		advanceTime(1 * time.Minute)
 
 		var cachedLimit int
-		cachedLimit, changed, err = cl.get(ctx, "test-key")
+		cachedLimit, _, changed, err = cl.get(ctx, "test-key")
 		require.NoError(t, err, "Should not error with cached value")
 		assert.Equal(t, firstLimit, cachedLimit, "Should return cached limit")
 		assert.False(t, changed, "Cached value should not indicate change")
@@ -91,7 +93,7 @@ func TestGetLimitMultipleCalls(t *testing.T) {
 
 	// This call should refresh the cache
 	var secondLimit int
-	secondLimit, changed, err = cl.get(ctx, "test-key")
+	secondLimit, _, changed, err = cl.get(ctx, "test-key")
 	require.NoError(t, err, "Should not error when refreshing")
 	assert.Equal(t, initialLimit+2, secondLimit, "New limit should be initialLimit+2")
 	assert.True(t, changed, "Second refresh should indicate limit changed")
@@ -103,7 +105,7 @@ func TestGetLimitMultipleCalls(t *testing.T) {
 		advanceTime(2 * time.Minute)
 
 		var cachedLimit int
-		cachedLimit, changed, err = cl.get(ctx, "test-key")
+		cachedLimit, _, changed, err = cl.get(ctx, "test-key")
 		require.NoError(t, err, "Should not error with new cached value")
 		assert.Equal(t, secondLimit, cachedLimit, "Should return new cached limit")
 		assert.False(t, changed, "Cached value should not indicate change")
@@ -121,24 +123,24 @@ func TestGetLimitErrorThenSuccess(t *testing.T) {
 	shouldFail := true
 	expectedLimit := 42
 
-	mockGetter := func(ctx context.Context, key string) (int, error) {
+	mockGetter := func(ctx context.Context, key string) (int, QueueingStrategy, error) {
 		if shouldFail {
 			shouldFail = false
-			return 0, expectedError
+			return 0, StrictFIFO, expectedError
 		}
-		return expectedLimit, nil
+		return expectedLimit, StrictFIFO, nil
 	}
 
 	cl := newCachedLimit(mockGetter, 10*time.Minute)
 
 	// First call - will fail
-	_, _, firstErr := cl.get(ctx, "test-key")
+	_, _, _, firstErr := cl.get(ctx, "test-key")
 
 	// Advance time past TTL
 	advanceTime(15 * time.Minute)
 
 	// Second call - should succeed
-	limit, changed, err := cl.get(ctx, "test-key")
+	limit, _, changed, err := cl.get(ctx, "test-key")
 
 	// Verify
 	if !errors.Is(firstErr, expectedError) {
@@ -163,31 +165,31 @@ func TestGetLimitErrorReturnsCachedValue(t *testing.T) {
 	expectedError := errors.New("limit service unavailable")
 	shouldFail := false
 
-	mockGetter := func(ctx context.Context, key string) (int, error) {
+	mockGetter := func(ctx context.Context, key string) (int, QueueingStrategy, error) {
 		if shouldFail {
-			return 0, expectedError
+			return 0, StrictFIFO, expectedError
 		}
-		return 5, nil
+		return 5, StrictFIFO, nil
 	}
 
 	cl := newCachedLimit(mockGetter, 10*time.Minute)
 
 	// First call populates the cache
-	limit, _, err := cl.get(ctx, "test-key")
+	limit, _, _, err := cl.get(ctx, "test-key")
 	require.NoError(t, err)
 	require.Equal(t, 5, limit)
 
 	// Past TTL, the getter fails: the last known limit is returned alongside the error
 	advanceTime(15 * time.Minute)
 	shouldFail = true
-	limit, changed, err := cl.get(ctx, "test-key")
+	limit, _, changed, err := cl.get(ctx, "test-key")
 	require.ErrorIs(t, err, expectedError)
 	assert.Equal(t, 5, limit, "last known limit should be returned on error")
 	assert.False(t, changed)
 
 	// The failed fetch must not refresh the timestamp, so the next call retries the getter
 	shouldFail = false
-	limit, _, err = cl.get(ctx, "test-key")
+	limit, _, _, err = cl.get(ctx, "test-key")
 	require.NoError(t, err)
 	assert.Equal(t, 5, limit)
 }

@@ -139,23 +139,28 @@ var workflowExistenceFunc = func(key string) bool {
 }
 
 func getSyncLimitFunc(_ context.Context, kube kubernetes.Interface) sync.GetSyncLimit {
-	syncLimitConfig := func(ctx context.Context, lockName string) (int, error) {
+	syncLimitConfig := func(ctx context.Context, lockName string) (int, sync.QueueingStrategy, error) {
 		items := strings.Split(lockName, "/")
 		if len(items) < 4 {
-			return 0, argoErr.New(argoErr.CodeBadRequest, "Invalid Config Map Key")
+			return 0, sync.StrictFIFO, argoErr.New(argoErr.CodeBadRequest, "Invalid Config Map Key")
 		}
 
 		configMap, err := kube.CoreV1().ConfigMaps(items[0]).Get(ctx, items[2], metav1.GetOptions{})
 		if err != nil {
-			return 0, err
+			return 0, sync.StrictFIFO, err
 		}
 
 		value, found := configMap.Data[items[3]]
 
 		if !found {
-			return 0, argoErr.New(argoErr.CodeBadRequest, "Invalid Sync configuration Key")
+			return 0, sync.StrictFIFO, argoErr.New(argoErr.CodeBadRequest, "Invalid Sync configuration Key")
 		}
-		return strconv.Atoi(value)
+		strategy, err := sync.ParseQueueingStrategy(configMap.Data[items[3]+queueingStrategySuffix])
+		if err != nil {
+			return 0, sync.StrictFIFO, argoErr.New(argoErr.CodeBadRequest, err.Error())
+		}
+		limit, err := strconv.Atoi(value)
+		return limit, strategy, err
 	}
 	return syncLimitConfig
 }

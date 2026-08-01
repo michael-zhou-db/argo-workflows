@@ -53,7 +53,7 @@ func (t *testMetricsRecorder) count(want takenLabels) int {
 func newTestManagerWithMetrics(ctx context.Context, t *testing.T) (*Manager, *testMetricsRecorder) {
 	t.Helper()
 	kube := fake.NewSimpleClientset()
-	syncLimitFunc := func(ctx context.Context, s string) (int, error) { return 1, nil }
+	syncLimitFunc := func(ctx context.Context, s string) (int, QueueingStrategy, error) { return 1, StrictFIFO, nil }
 	mgr, err := NewLockManager(ctx, kube, "", nil, syncLimitFunc, func(string) {}, func(string) bool { return false }, false)
 	require.NoError(t, err)
 	rec := newTestMetricsRecorder()

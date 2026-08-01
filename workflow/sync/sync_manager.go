@@ -25,7 +25,7 @@ import (
 
 type (
 	NextWorkflow   func(string)
-	GetSyncLimit   func(context.Context, string) (int, error)
+	GetSyncLimit   func(context.Context, string) (int, QueueingStrategy, error)
 	WorkflowExists func(string) bool
 )
 

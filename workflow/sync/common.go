@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/argoproj/argo-workflows/v4/util/sqldb"
@@ -34,6 +35,37 @@ type semaphore interface {
 	probeWaiting(ctx context.Context)
 	lock(ctx context.Context) bool
 	unlock(ctx context.Context)
+}
+
+// QueueingStrategy determines whether a waiter that cannot be admitted blocks
+// the waiters behind it.
+type QueueingStrategy string
+
+const (
+	// StrictFIFO admits only the head of the priority queue, so a waiter that
+	// cannot be admitted blocks every waiter behind it even when slots are free.
+	StrictFIFO QueueingStrategy = "StrictFIFO"
+	// BestEffortFIFO admits waiters in priority order up to the number of free
+	// slots, so a waiter that cannot be admitted does not block waiters behind it
+	// that do fit. Priority still decides who is admitted sooner, but waiters
+	// admitted together may acquire in any order among themselves.
+	BestEffortFIFO QueueingStrategy = "BestEffortFIFO"
+)
+
+// ParseQueueingStrategy converts a configured value into a QueueingStrategy.
+// An empty value selects the default, StrictFIFO, which preserves the behaviour
+// of releases before the strategy was configurable.
+func ParseQueueingStrategy(value string) (QueueingStrategy, error) {
+	switch QueueingStrategy(value) {
+	case "":
+		return StrictFIFO, nil
+	case StrictFIFO:
+		return StrictFIFO, nil
+	case BestEffortFIFO:
+		return BestEffortFIFO, nil
+	default:
+		return "", fmt.Errorf("invalid queueing strategy %q, must be %q or %q", value, StrictFIFO, BestEffortFIFO)
+	}
 }
 
 // expose for overriding in tests

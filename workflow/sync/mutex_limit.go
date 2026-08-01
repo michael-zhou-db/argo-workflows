@@ -6,6 +6,8 @@ type mutexLimit struct{}
 
 var _ limitProvider = &mutexLimit{}
 
-func (*mutexLimit) get(_ context.Context, _ string) (int, bool, error) {
-	return 1, false, nil
+// get always reports StrictFIFO: a size-1 lock has no batch to admit, so the
+// strategy cannot change its behaviour.
+func (*mutexLimit) get(_ context.Context, _ string) (int, QueueingStrategy, bool, error) {
+	return 1, StrictFIFO, false, nil
 }

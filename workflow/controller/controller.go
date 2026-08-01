@@ -182,6 +182,11 @@ const (
 	workflowExistenceCheckPeriod        = 1 * time.Minute
 	workflowTaskSetResyncPeriod         = 20 * time.Minute
 	configMapResyncPeriod               = 20 * time.Minute
+
+	// queueingStrategySuffix is appended to a semaphore's ConfigMap key to find the
+	// key holding its queueing strategy, e.g. "workflow.queueingStrategy" for the
+	// semaphore configured by "workflow".
+	queueingStrategySuffix = ".queueingStrategy"
 )
 
 var (
@@ -469,10 +474,10 @@ func (wfc *WorkflowController) RunPrometheusServer(ctx context.Context, isDummy 
 
 // Create and the Synchronization Manager
 func (wfc *WorkflowController) createSynchronizationManager(ctx context.Context) {
-	getSyncLimit := func(ctx context.Context, lockKey string) (int, error) {
+	getSyncLimit := func(ctx context.Context, lockKey string) (int, sync.QueueingStrategy, error) {
 		lockName, err := sync.DecodeLockName(ctx, lockKey)
 		if err != nil {
-			return 0, err
+			return 0, sync.StrictFIFO, err
 		}
 		configmapsIf := wfc.kubeclientset.CoreV1().ConfigMaps(lockName.GetNamespace())
 		var configMap *apiv1.ConfigMap
@@ -482,14 +487,21 @@ func (wfc *WorkflowController) createSynchronizationManager(ctx context.Context)
 			return !errors.IsTransientErr(ctx, getErr), getErr
 		})
 		if err != nil {
-			return 0, err
+			return 0, sync.StrictFIFO, err
 		}
 
 		value, found := configMap.Data[lockName.GetKey()]
 		if !found {
-			return 0, argoErr.New(argoErr.CodeBadRequest, fmt.Sprintf("Sync configuration key '%s' not found in ConfigMap", lockName.GetKey()))
+			return 0, sync.StrictFIFO, argoErr.New(argoErr.CodeBadRequest, fmt.Sprintf("Sync configuration key '%s' not found in ConfigMap", lockName.GetKey()))
 		}
-		return strconv.Atoi(value)
+		// The strategy lives in a sibling key so the limit value stays a bare
+		// integer for the API and CLI that also read it. Absent means StrictFIFO.
+		strategy, err := sync.ParseQueueingStrategy(configMap.Data[lockName.GetKey()+queueingStrategySuffix])
+		if err != nil {
+			return 0, sync.StrictFIFO, argoErr.New(argoErr.CodeBadRequest, fmt.Sprintf("Sync configuration key '%s%s' is invalid: %v", lockName.GetKey(), queueingStrategySuffix, err))
+		}
+		limit, err := strconv.Atoi(value)
+		return limit, strategy, err
 	}
 
 	nextWorkflow := func(key string) {
